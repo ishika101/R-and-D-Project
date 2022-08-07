@@ -1,0 +1,182 @@
+var roi = 
+    /* color: #00ffff */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[93.90725769387791, 27.53928303692164],
+          [93.90725769387791, 26.918964665784703],
+          [94.30001892434666, 26.918964665784703],
+          [94.30001892434666, 27.53928303692164]]], null, false),
+    roi2 = 
+    /* color: #bf04c2 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[93.91000427590916, 27.536847632012037],
+          [93.91000427590916, 26.926311377472757],
+          [94.30276550637791, 26.926311377472757],
+          [94.30276550637791, 27.536847632012037]]], null, false);
+var roi = roi2;
+Map.centerObject(roi)
+
+// (2) Define time filter (change the start and end dates):
+var sDate_T1 = "2019-01-01"; 
+var eDate_T1 = "2020-01-01"; 
+
+// (3) Optionally modify the classification parameters:
+var mndwi_param = -0.40;
+var ndvi_param = 0.20;
+var cleaning_pixels = 100;
+
+// Workflow code (no edits needed below this point)
+
+// Standardise band names, merge Landsat data: 
+var bn8 = ['B1', 'B2', 'B3', 'B4', 'B6', 'pixel_qa', 'B5', 'B7'];
+var bn7 = ['B1', 'B1', 'B2', 'B3', 'B5', 'pixel_qa', 'B4', 'B7'];
+var bn5 = ['B1', 'B1', 'B2', 'B3', 'B5', 'pixel_qa', 'B4', 'B7'];
+var bns = ['uBlue', 'Blue', 'Green', 'Red', 'Swir1', 'BQA', 'Nir', 'Swir2'];
+var ls5 = ee.ImageCollection("LANDSAT/LT05/C01/T1_SR").select(bn5, bns);
+var ls7 = (ee.ImageCollection("LANDSAT/LE07/C01/T1_SR")
+  .filterDate('1999-04-15', '2003-05-30')
+  .select(bn7, bns));
+var ls8 = ee.ImageCollection("LANDSAT/LC08/C01/T1_SR").select(bn8, bns);
+var merged = ls5.merge(ls7).merge(ls8);
+
+// Set functions for classification:
+var Ndvi = function(image) {
+  // calculate normalized difference vegetation index
+  var ndvi = image.normalizedDifference(['Nir', 'Red']).rename('ndvi');
+  return(ndvi);
+};
+
+var Lswi = function(image) {
+  // calculate land surface water index
+  var lswi = image.normalizedDifference(['Nir', 'Swir1']).rename('lswi');
+ return(lswi);
+};
+
+var Mndwi = function(image) {
+  // calculate modified normalized difference water index
+  var mndwi = image.normalizedDifference(['Green', 'Swir1']).rename('mndwi');
+  return(mndwi);
+};
+
+var Evi = function(image) {
+  // calculate the enhanced vegetation index
+  var evi = image.expression('2.5 * (Nir - Red) / (1 + Nir + 6 * Red - 7.5 * Blue)', {
+    'Nir': image.select(['Nir']),
+    'Red': image.select(['Red']),
+    'Blue': image.select(['Blue'])
+    });
+  return(evi.rename(['evi']));
+};
+
+// SetvVisualisation parameters:
+var params_true = {crs: 'EPSG:4326', region: roi, min: 0.0, max: 0.3, bands: ["Red", "Green", "Blue"], dimensions: 1000};
+var params_false = {crs: 'EPSG:4326', region: roi, min: 0.0, max: 0.3, bands: ["Swir1", "Red", "Green"], dimensions: 1000};
+var params_waterViz = {crs: 'EPSG:4326', region: roi, min: 0, max: 1, palette: ['white', 'blue'],dimensions: 1000};
+var params_activebeltViz = {crs: 'EPSG:4326', region: roi, min: 0, max: 1, palette: ['white', 'grey'],dimensions: 1000};
+var params_activeViz = {crs: 'EPSG:4326', region: roi, min: 0, max: 1, palette: ['white', 'grey'],dimensions: 1000};
+
+var waterViz = {min: 0, max: 1, palette: ['white', 'blue']};
+var activebeltViz = {min: 0, max: 1, palette: ['white', 'grey']};
+var activeViz = {min: 0, max: 1, palette: ['white', 'MediumOrchid ']};
+var active_cleanedViz = {min: 0, max: 1, palette: ['white', 'OrangeRed ']};
+
+// Filter date range, roi and apply simple cloud processing:
+var imgCol = merged.filterDate(sDate_T1, eDate_T1) 
+                 .filterBounds(roi)
+                 .map(function(image) { 
+                    var cloudShadowBitMask = 1 << 3; 
+                    var cloudsBitMask = 1 << 5; 
+                    var qa = image.select('BQA'); 
+                    var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0) 
+                                 .and(qa.bitwiseAnd(cloudsBitMask).eq(0)); 
+                    return image.updateMask(mask).multiply(0.0001).clip(roi)
+                   }); 
+                   
+print(imgCol.size(),'T1: Number of Landsat tiles used'); 
+
+// Define and rename quantiles of interest:
+var bnp50 = ['uBlue_p50', 'Blue_p50', 'Green_p50', 'Red_p50', 'Swir1_p50', 'BQA_p50', 'Nir_p50', 'Swir2_p50'];
+var p50 = imgCol.reduce(ee.Reducer.percentile([50])).select(bnp50, bns);
+
+// Sort image collection for GIF:
+var sorted = imgCol.sort('CLOUD_COVER');
+var scene = sorted.first().multiply(0.0001);
+
+// Apply to each percentile:
+var mndwi_p50 = Mndwi(p50);
+var ndvi_p50 = Ndvi(p50);
+var evi_p50 = Evi(p50);
+var lswi_p50 = Lswi(p50);
+
+// Water classification from (Zou 2018):
+var water_p50 = (mndwi_p50.gt(ndvi_p50).or(mndwi_p50.gt(evi_p50))).and(evi_p50.lt(0.1));
+var waterMasked_p50 = water_p50.updateMask(water_p50.gt(0));
+
+// Active river belt classification:
+var activebelt_p50 = (mndwi_p50.gte(mndwi_param)).and(ndvi_p50.lte(ndvi_param));
+var activebeltMasked_p50 = activebelt_p50.updateMask(activebelt_p50.gt(0));
+var active_p50 = (water_p50).or(activebelt_p50);
+
+// Clean binary active channel:
+var smooth_map_p50 = active_p50
+           .focal_mode({
+           radius: 10, kernelType: 'octagon', units: 'pixels', iterations: 1
+           })
+           .mask(active_p50.gte(1));
+
+var noise_removal_p50 = active_p50
+            .updateMask(active_p50.connectedPixelCount(cleaning_pixels, false).gte(cleaning_pixels))
+            .unmask(smooth_map_p50);
+                            
+var noise_removal_p50_Masked = noise_removal_p50.updateMask(noise_removal_p50.gt(0));
+
+
+// Define outputs:
+var True_colour = p50.select(["Red", "Green", "Blue"]);
+var False_colour = p50.select(["Swir1", "Red", "Green"]);
+var Wetted_channel = waterMasked_p50;
+var Alluvial_deposits = activebeltMasked_p50;
+var Active_channel_binary_mask = noise_removal_p50_Masked;
+
+var cloudy = merged.filterDate(sDate_T1, eDate_T1) 
+                 .filterBounds(roi)
+                 .map(function(image) { 
+                    return image.multiply(0.0001).clip(roi)
+                   }); 
+
+// Display on map:
+Map.addLayer(True_colour.clip(roi), params_true, 'True colour temporal composite', false);
+Map.addLayer(False_colour.clip(roi), params_false, 'False colour temporal composite', true);
+Map.addLayer(Wetted_channel, waterViz, 'Wetted channel', false);
+Map.addLayer(Alluvial_deposits, activebeltViz, 'Alluvial deposits', false);
+Map.addLayer(Active_channel_binary_mask, activebeltViz, 'Active channel binary mask', true);
+
+//print(ui.Thumbnail(cloudy, params_true),"True colour image collection GIF"); 
+//print(ui.Thumbnail(cloudy, params_false),"False colour image collection GIF"); 
+//print(ui.Thumbnail(True_colour, params_true),"True colour temporal composite image"); 
+//print(ui.Thumbnail(False_colour, params_false),"False colour temporal composite image"); 
+print(ui.Thumbnail(Wetted_channel, params_waterViz),"Wetted channel"); 
+print(ui.Thumbnail(Alluvial_deposits, params_activebeltViz),"Alluvial deposits"); 
+print(ui.Thumbnail(Active_channel_binary_mask, params_activeViz),"Cleaned binary active channel"); 
+
+// Export to Google Drive (example):
+Export.image.toDrive({  
+  image: Active_channel_binary_mask, 
+  description: 'image_subansari_2019_2020',
+  region: roi,
+  scale: 30,
+  fileFormat: 'GeoTIFF',  
+  folder: 'GEE_Example_Workflow',
+  maxPixels: 1e12,  
+}); 
